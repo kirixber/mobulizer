@@ -70,8 +70,8 @@ Mobulizer gives that old phone one more job:
 
 ### Downloads
 
---> [Android](https://github.com/kirixber/mobulizer/releases/latest)
---> [Windows](https://github.com/kirixber/mobulizer/releases/latest)
+--> [Android](https://github.com/kirixber/mobulizer/releases/latest)<br>
+--> [Windows](https://github.com/kirixber/mobulizer/releases/latest)<br>
 --> Linux larping soon
 
 ## project status
