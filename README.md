@@ -42,17 +42,17 @@ music on your PC
 ### Windows
 
 1. Make sure [Python](https://www.python.org/downloads/) is installed on your system and added in env path.
-2.. Download the latest Windows client
-3. Open terminal in that direcory
+2.. Download the latest Windows client<br>
+3. Open terminal in that direcory<br>
 ```powershell
 $ python.exe bridge.py
 ```
-2. Windows client started
-3. Make sure your phone is on the same Wi-Fi
-4. Open the Android app
-5. Put the phone on your desk
-6. play some music
-7. enjoy the glow ✦
+4. Windows client started
+5. Make sure your phone is on the same Wi-Fi
+6. Open the Android app
+7. Put the phone on your desk
+8. play some music
+9. enjoy the glow ✦
 
 ### Android
 
