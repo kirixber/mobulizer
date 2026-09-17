@@ -44,8 +44,11 @@ music on your PC
 ```text
 1. Download the Windows client
 2. Open terminal in that direcory
-3. ```powershell
+```
+```powershell
 python bridge.py
+```
+```text
 2. Windows client started
 3. Make sure your phone is on the same Wi-Fi
 4. Open the Android app
