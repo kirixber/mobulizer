@@ -32,7 +32,7 @@ music on your PC
        ↓
       Wi-Fi
        ↓
-   old phone
+     phone
        ↓
    ✦ vibing ✦
 ```
@@ -41,25 +41,22 @@ music on your PC
 
 ### Windows
 
-```markdown
-1. Download the Windows client
-2. Open terminal in that direcory
-```
+1. Make sure [Python](https://www.python.org/downloads/) is installed on your system and added in env path.
+2.. Download the latest Windows client
+3. Open terminal in that direcory
 ```powershell
-python bridge.py
+$ python.exe bridge.py
 ```
-```markdown
 2. Windows client started
 3. Make sure your phone is on the same Wi-Fi
 4. Open the Android app
 5. Put the phone on your desk
 6. play some music
 7. enjoy the glow ✦
-```
 
 ### Android
 
-Just install the APK, open it, and leave it running.
+Just install the [APK](), open it, and leave it running.
 
 That's basically it.
 
@@ -71,12 +68,22 @@ Mobulizer gives that old phone one more job:
 
 **sit on your desk and look cool.**
 
+### Downloads
+
+--> [Android](https://github.com/kirixber/mobulizer/releases/latest)
+--> [Windows](https://github.com/kirixber/mobulizer/releases/latest)
+--> Linux larping soon
+
 ## project status
 
 This thing is still being built.
 
 Expect bugs. Expect random shit to break.
 But hey, that's part of the fun.
+
+-more features will be adding soon
+-linux support soon
+Stay tuned ₍^. .^₎Ⳋ
 
 ## contributing
 
