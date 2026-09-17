@@ -34,22 +34,26 @@ public class VisualizerRenderer implements GLSurfaceView.Renderer {
     private static final long DEFAULT_INTERVAL_NS = 33_000_000L;
 
     // If packets stop arriving, smoothly bring the spectrum to zero.
-    private static final long DATA_TIMEOUT_NS = 400_000_000L;   // 400 ms
 
     // =========================================================
-    // SMOOTHING
+    // SYNCHRONIZED PLAYOUT / SMOOTHING
     // =========================================================
 
-    // CAVA updates arrive at roughly 33 FPS in the tested Windows setup.
-    // The old packet-to-packet easing therefore launched every new frame too
-    // aggressively and made the bars look like they were flickering.
-    //
-    // The GL thread now continuously chases the newest target at display
-    // refresh rate. Every bar uses the SAME time constants, keeping the whole
-    // spectrum coherent instead of making each bar behave like its own spring.
-    private static final float ATTACK_TIME_MS = 105.0f;
-    private static final float RELEASE_TIME_MS = 230.0f;
-    private static final float SILENCE_RELEASE_TIME_MS = 260.0f;
+    // CAVA runs at roughly 33 FPS in the tested Windows setup.
+    // Each packet contains the bridge's monotonic timestamp. Every phone
+    // synchronizes its clock to the bridge and renders a short fixed amount
+    // behind the live stream. That means both phones target the SAME CAVA
+    // timestamp instead of reacting to slightly different Wi-Fi arrival times.
+    private static final long PLAYOUT_DELAY_US = 120_000L; // 120 ms
+    private static final long SYNC_INTERVAL_MS = 1_500L;
+    private static final int FRAME_BUFFER_SIZE = 16;
+
+    // Small final smoothing pass. Timestamp interpolation does the main work.
+    private static final float ATTACK_TIME_MS = 95.0f;
+    private static final float RELEASE_TIME_MS = 220.0f;
+
+    // If packets stop arriving, glide toward zero.
+    private static final long DATA_TIMEOUT_NS = 500_000_000L;
 
     // CAVA values often occupy only a fraction of 0..1 during normal playback.
     // Boost the display-only amplitude so ordinary music reaches higher on screen
@@ -96,15 +100,35 @@ public class VisualizerRenderer implements GLSurfaceView.Renderer {
 
     private int barCount = 32;
 
-    // Newest network target for each bar, normalized 0..1.
-    private final float[] targetBars = new float[MAX_BARS];
+    // Packet parsing state.
+    private final float[] parseTarget = new float[MAX_BARS];
+    private final float[] mappedTarget = new float[MAX_BARS];
+    private int parsedCount = 0;
+    private long parsedTimestampUs = 0L;
 
-    // Actual visual state drawn by the GL thread.
+    // Timestamped CAVA frame ring buffer.
+    private final long[] frameTimesUs =
+            new long[FRAME_BUFFER_SIZE];
+    private final float[][] frameBars =
+            new float[FRAME_BUFFER_SIZE][MAX_BARS];
+    private final int[] frameCounts =
+            new int[FRAME_BUFFER_SIZE];
+
+    private int frameWriteIndex = 0;
+    private int frameCount = 0;
+
+    // Actual visual state.
     private final float[] renderedBars = new float[MAX_BARS];
 
     private long lastArrivalNs = 0L;
     private boolean decaying = false;
     private long lastFrameNs = 0L;
+
+    // Bridge clock = Android clock + clockOffsetUs.
+    private volatile long clockOffsetUs = 0L;
+    private volatile boolean clockSynced = false;
+    private volatile long bestSyncRttUs = Long.MAX_VALUE;
+
 
     // =========================================================
     // DEBUG STATS (read by the MainActivity overlay)
@@ -170,11 +194,6 @@ public class VisualizerRenderer implements GLSurfaceView.Renderer {
     private DatagramSocket receiverSocket;
     private Thread receiverThread;
 
-    // Receiver-thread-only parse staging.
-    private final float[] parseTarget = new float[MAX_BARS];
-    private final float[] mappedTarget = new float[MAX_BARS];
-    private int parsedCount = 0;
-
     // =========================================================
     // CONSTRUCTOR
     // =========================================================
@@ -237,10 +256,16 @@ public class VisualizerRenderer implements GLSurfaceView.Renderer {
 
         synchronized (dataLock) {
             barCount = count;
+
+            // Rotation changes the client bar count. Flush old-shape frames,
+            // but do NOT reset the global CAVA timeline.
+            clearFrameBufferLocked();
+
             for (int i = 0; i < MAX_BARS; i++) {
-                targetBars[i] = 0f;
                 renderedBars[i] = 0f;
+                drawTargets[i] = 0f;
             }
+
             lastArrivalNs = 0L;
             decaying = false;
             lastFrameNs = 0L;
@@ -271,18 +296,38 @@ public class VisualizerRenderer implements GLSurfaceView.Renderer {
         int count;
 
         synchronized (dataLock) {
-            // If the network stream disappears, smoothly target zero.
+            count = barCount;
+
+            if (frameCount > 0) {
+                long localUs = nowNs / 1000L;
+                long bridgeNowUs =
+                        localUs + clockOffsetUs;
+                long playbackUs =
+                        bridgeNowUs - PLAYOUT_DELAY_US;
+
+                if (clockSynced) {
+                    sampleTimelineLocked(
+                            playbackUs,
+                            drawTargets,
+                            count);
+                } else {
+                    sampleLatestLocked(
+                            drawTargets,
+                            count);
+                }
+            } else {
+                for (int i = 0; i < count; i++) {
+                    drawTargets[i] = 0f;
+                }
+            }
+
             if (lastArrivalNs != 0L
-                    && !decaying
                     && nowNs - lastArrivalNs > DATA_TIMEOUT_NS) {
-                for (int i = 0; i < barCount; i++) {
-                    targetBars[i] = 0f;
+                for (int i = 0; i < count; i++) {
+                    drawTargets[i] = 0f;
                 }
                 decaying = true;
             }
-
-            count = barCount;
-            System.arraycopy(targetBars, 0, drawTargets, 0, count);
         }
 
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
@@ -297,28 +342,22 @@ public class VisualizerRenderer implements GLSurfaceView.Renderer {
             rebuildGeometry(count);
         }
 
-        // Continuous low-pass chase. All bars use the same timing, so the
-        // spectrum moves as one coherent animation.
-        final boolean silence = decaying;
-
+        // Timestamp interpolation synchronizes the source timeline.
+        // Keep a deliberately slower, asymmetric visual follower on top:
+        // fast enough to catch beats, but slow enough to avoid twitching
+        // when the raw source values jump between frames.
         for (int i = 0; i < count; i++) {
-            final float current = renderedBars[i];
-            final float target = clamp01(drawTargets[i]);
+            float target = clamp01(drawTargets[i]);
+            float current = renderedBars[i];
 
-            final float tauMs;
-            if (silence) {
-                tauMs = SILENCE_RELEASE_TIME_MS;
-            } else if (target > current) {
-                tauMs = ATTACK_TIME_MS;
-            } else {
-                tauMs = RELEASE_TIME_MS;
-            }
+            float followMs =
+                    target >= current
+                            ? ATTACK_TIME_MS
+                            : RELEASE_TIME_MS;
 
-            // Exponential approach is smooth and packet-rate independent.
-            // It does not restart an easing curve every time a UDP packet
-            // arrives, which removes the previous visible flicker.
-            final float alpha =
-                    1.0f - (float) Math.exp(-dtMs / tauMs);
+            float alpha =
+                    1.0f - (float) Math.exp(
+                            -dtMs / followMs);
 
             renderedBars[i] =
                     current + (target - current) * alpha;
@@ -572,34 +611,144 @@ public class VisualizerRenderer implements GLSurfaceView.Renderer {
 
     private boolean parsePacket(byte[] buffer, int length) {
         if (length < 14) return false;
-        if (buffer[0] != 'C' || buffer[1] != 'A'
-                || buffer[2] != 'V' || buffer[3] != 'A') return false;
 
-        int count = (buffer[12] & 0xFF) | ((buffer[13] & 0xFF) << 8);
+        if (buffer[0] != 'C' || buffer[1] != 'A'
+                || buffer[2] != 'V' || buffer[3] != 'A') {
+            return false;
+        }
+
+        // Bytes 4..11: bridge monotonic timestamp (little-endian uint64).
+        long timestampUs = 0L;
+        for (int i = 0; i < 8; i++) {
+            timestampUs |=
+                    ((long) buffer[4 + i] & 0xFFL)
+                            << (8 * i);
+        }
+
+        int count =
+                (buffer[12] & 0xFF)
+                        | ((buffer[13] & 0xFF) << 8);
+
         if (count < 16 || count > MAX_BARS) return false;
         if (length != 14 + count * 2) return false;
 
         for (int i = 0; i < count; i++) {
             int offset = 14 + i * 2;
-            int value = (buffer[offset] & 0xFF)
-                    | ((buffer[offset + 1] & 0xFF) << 8);
-            parseTarget[i] = value / 65535f;
+
+            int value =
+                    (buffer[offset] & 0xFF)
+                            | ((buffer[offset + 1] & 0xFF) << 8);
+
+            parseTarget[i] =
+                    value / 65535f;
         }
+
         parsedCount = count;
+        parsedTimestampUs = timestampUs;
         return true;
     }
 
     private void commitPacket() {
-        final long nowNs = System.nanoTime();
+        final long arrivalNs = System.nanoTime();
         final int count = parsedCount;
+        final long timestampUs = parsedTimestampUs;
 
-        if (count <= 0) return;
-
-        long durationSnapshot = DEFAULT_INTERVAL_NS;
+        if (count <= 0 || timestampUs <= 0L) return;
 
         synchronized (dataLock) {
-            if (lastArrivalNs != 0L) {
-                long delta = nowNs - lastArrivalNs;
+            // Ignore duplicates/out-of-order Wi-Fi delivery.
+            if (frameCount > 0) {
+                int newest =
+                        (frameWriteIndex
+                                - 1
+                                + FRAME_BUFFER_SIZE)
+                                % FRAME_BUFFER_SIZE;
+
+                if (timestampUs <= frameTimesUs[newest]) {
+                    return;
+                }
+
+                // Client rotation changes bar count. Drop only old-shape
+                // frames; CAVA itself continues uninterrupted on the bridge.
+                if (frameCounts[newest] != count) {
+                    clearFrameBufferLocked();
+                }
+            }
+
+            // Rebuild the requested CAVA visual:
+            //
+            //   TREBLE ... MID ... BASS | BASS ... MID ... TREBLE
+            //
+            // Lowest frequencies therefore remain at the exact center.
+            if (FORCE_MIRRORED_SPECTRUM && count >= 2) {
+                final int half = count / 2;
+                final int sourceMax = count - 1;
+
+                for (int out = 0; out < count; out++) {
+                    int distanceFromCenter =
+                            out < half
+                                    ? half - 1 - out
+                                    : out - half;
+
+                    float normalized =
+                            half <= 1
+                                    ? 0f
+                                    : (float) distanceFromCenter
+                                      / (float) (half - 1);
+
+                    int sourceIndex =
+                            Math.round(
+                                    normalized * sourceMax);
+
+                    if (sourceIndex < 0) sourceIndex = 0;
+                    if (sourceIndex > sourceMax) {
+                        sourceIndex = sourceMax;
+                    }
+
+                    mappedTarget[out] =
+                            parseTarget[sourceIndex];
+                }
+            } else {
+                System.arraycopy(
+                        parseTarget,
+                        0,
+                        mappedTarget,
+                        0,
+                        count);
+            }
+
+            int slot = frameWriteIndex;
+
+            frameTimesUs[slot] = timestampUs;
+            frameCounts[slot] = count;
+
+            System.arraycopy(
+                    mappedTarget,
+                    0,
+                    frameBars[slot],
+                    0,
+                    count);
+
+            for (int i = count; i < MAX_BARS; i++) {
+                frameBars[slot][i] = 0f;
+            }
+
+            frameWriteIndex =
+                    (frameWriteIndex + 1)
+                            % FRAME_BUFFER_SIZE;
+
+            if (frameCount < FRAME_BUFFER_SIZE) {
+                frameCount++;
+            }
+
+            barCount = count;
+            lastArrivalNs = arrivalNs;
+            decaying = false;
+
+            // Arrival interval is debug information only.
+            if (statLastPacketNs != 0L) {
+                long delta =
+                        arrivalNs - statLastPacketNs;
 
                 if (delta < MIN_INTERVAL_NS) {
                     delta = MIN_INTERVAL_NS;
@@ -607,78 +756,184 @@ public class VisualizerRenderer implements GLSurfaceView.Renderer {
                     delta = MAX_INTERVAL_NS;
                 }
 
-                // Keep the stat as an EMA only. Animation itself is no longer
-                // tied to this duration.
-                durationSnapshot =
+                long ema =
                         (statIntervalNs * 3L + delta) / 4L;
 
-                if (durationSnapshot < MIN_INTERVAL_NS) {
-                    durationSnapshot = MIN_INTERVAL_NS;
-                } else if (durationSnapshot > MAX_INTERVAL_NS) {
-                    durationSnapshot = MAX_INTERVAL_NS;
-                }
+                statIntervalNs =
+                        Math.max(
+                                MIN_INTERVAL_NS,
+                                Math.min(
+                                        MAX_INTERVAL_NS,
+                                        ema));
             }
-
-            // Publish ONLY the newest packet.
-            //
-            // IMPORTANT: the visual layout is deliberately reconstructed here.
-            // We want the exact CAVA-style spatial relationship:
-            //
-            //     TREBLE ... MID ... BASS | BASS ... MID ... TREBLE
-            //                                  ^ center ^
-            //
-            // The incoming project stream is treated as a normal low->high
-            // spectrum. We resample that full spectrum onto one half and mirror
-            // it. This puts the lowest frequencies at the center instead of at
-            // the left edge.
-            if (FORCE_MIRRORED_SPECTRUM && count >= 2) {
-                final int half = count / 2;
-                final int sourceMax = count - 1;
-
-                for (int out = 0; out < count; out++) {
-                    final int distanceFromCenter;
-
-                    if (out < half) {
-                        distanceFromCenter = half - 1 - out;
-                    } else {
-                        distanceFromCenter = out - half;
-                    }
-
-                    // 0 = bass/center, half-1 = treble/edge.
-                    float normalized = half <= 1
-                            ? 0f
-                            : (float) distanceFromCenter / (float) (half - 1);
-
-                    int sourceIndex = Math.round(normalized * sourceMax);
-                    if (sourceIndex < 0) sourceIndex = 0;
-                    if (sourceIndex > sourceMax) sourceIndex = sourceMax;
-
-                    mappedTarget[out] = parseTarget[sourceIndex];
-                }
-
-                System.arraycopy(mappedTarget, 0, targetBars, 0, count);
-            } else {
-                System.arraycopy(
-                        parseTarget,
-                        0,
-                        targetBars,
-                        0,
-                        count
-                );
-            }
-
-            for (int i = count; i < MAX_BARS; i++) {
-                targetBars[i] = 0f;
-            }
-
-            barCount = count;
-            lastArrivalNs = nowNs;
-            decaying = false;
         }
 
         statPackets++;
-        statLastPacketNs = nowNs;
-        statIntervalNs = durationSnapshot;
+        statLastPacketNs = arrivalNs;
+    }
+
+    private void clearFrameBufferLocked() {
+        frameCount = 0;
+        frameWriteIndex = 0;
+
+        for (int i = 0; i < FRAME_BUFFER_SIZE; i++) {
+            frameTimesUs[i] = 0L;
+            frameCounts[i] = 0;
+        }
+    }
+
+    private void sampleLatestLocked(
+            float[] out,
+            int count) {
+
+        if (frameCount <= 0) {
+            for (int i = 0; i < count; i++) {
+                out[i] = 0f;
+            }
+            return;
+        }
+
+        int newest =
+                (frameWriteIndex
+                        - 1
+                        + FRAME_BUFFER_SIZE)
+                        % FRAME_BUFFER_SIZE;
+
+        int n =
+                Math.min(
+                        count,
+                        frameCounts[newest]);
+
+        System.arraycopy(
+                frameBars[newest],
+                0,
+                out,
+                0,
+                n);
+
+        for (int i = n; i < count; i++) {
+            out[i] = 0f;
+        }
+    }
+
+    private void sampleTimelineLocked(
+            long playbackUs,
+            float[] out,
+            int count) {
+
+        if (frameCount <= 0) {
+            for (int i = 0; i < count; i++) {
+                out[i] = 0f;
+            }
+            return;
+        }
+
+        int before = -1;
+        int after = -1;
+
+        long beforeTime = Long.MIN_VALUE;
+        long afterTime = Long.MAX_VALUE;
+
+        for (int n = 0; n < frameCount; n++) {
+            int index =
+                    (frameWriteIndex
+                            - frameCount
+                            + n
+                            + FRAME_BUFFER_SIZE)
+                            % FRAME_BUFFER_SIZE;
+
+            long time = frameTimesUs[index];
+
+            if (time <= playbackUs
+                    && time > beforeTime) {
+                before = index;
+                beforeTime = time;
+            }
+
+            if (time >= playbackUs
+                    && time < afterTime) {
+                after = index;
+                afterTime = time;
+            }
+        }
+
+        if (before < 0) {
+            int oldest =
+                    (frameWriteIndex
+                            - frameCount
+                            + FRAME_BUFFER_SIZE)
+                            % FRAME_BUFFER_SIZE;
+
+            int n =
+                    Math.min(
+                            count,
+                            frameCounts[oldest]);
+
+            System.arraycopy(
+                    frameBars[oldest],
+                    0,
+                    out,
+                    0,
+                    n);
+
+            for (int i = n; i < count; i++) {
+                out[i] = 0f;
+            }
+            return;
+        }
+
+        if (after < 0
+                || after == before
+                || afterTime <= beforeTime) {
+
+            int n =
+                    Math.min(
+                            count,
+                            frameCounts[before]);
+
+            System.arraycopy(
+                    frameBars[before],
+                    0,
+                    out,
+                    0,
+                    n);
+
+            for (int i = n; i < count; i++) {
+                out[i] = 0f;
+            }
+            return;
+        }
+
+        float t =
+                (float) (playbackUs - beforeTime)
+                        / (float) (afterTime - beforeTime);
+
+        if (t < 0f) t = 0f;
+        if (t > 1f) t = 1f;
+
+        // Smoothstep between CAVA frames.
+        t = t * t * (3f - 2f * t);
+
+        int beforeCount =
+                frameCounts[before];
+
+        int afterCount =
+                frameCounts[after];
+
+        for (int i = 0; i < count; i++) {
+            float a =
+                    i < beforeCount
+                            ? frameBars[before][i]
+                            : 0f;
+
+            float b =
+                    i < afterCount
+                            ? frameBars[after][i]
+                            : 0f;
+
+            out[i] =
+                    a + (b - a) * t;
+        }
     }
 
     // =========================================================
@@ -729,12 +984,167 @@ public class VisualizerRenderer implements GLSurfaceView.Renderer {
     // =========================================================
     private void startHeartbeat() {
         Thread t = new Thread(() -> {
-            while (receiverRunning) {
-                try { Thread.sleep(3000); } catch (InterruptedException e) { return; }
-                int w = lastRequestedWidth;
-                if (w > 0) sendBarRequest(w);
+            DatagramSocket socket = null;
+
+            try {
+                socket = new DatagramSocket();
+                socket.setBroadcast(true);
+                socket.setSoTimeout(700);
+
+                while (receiverRunning) {
+                    int width = lastRequestedWidth;
+
+                    // 1) Keep this phone registered with the bridge.
+                    if (width > 0) {
+                        byte[] barsData =
+                                ("BARS " + width)
+                                        .getBytes("US-ASCII");
+
+                        DatagramPacket barsPacket =
+                                new DatagramPacket(
+                                        barsData,
+                                        barsData.length,
+                                        InetAddress.getByName(
+                                                "255.255.255.255"),
+                                        CONTROL_PORT);
+
+                        socket.send(barsPacket);
+                    }
+
+                    // 2) NTP-style clock sync sample.
+                    long t1Us =
+                            System.nanoTime() / 1000L;
+
+                    byte[] syncData =
+                            ("SYNC " + t1Us)
+                                    .getBytes("US-ASCII");
+
+                    DatagramPacket syncPacket =
+                            new DatagramPacket(
+                                    syncData,
+                                    syncData.length,
+                                    InetAddress.getByName(
+                                            "255.255.255.255"),
+                                    CONTROL_PORT);
+
+                    socket.send(syncPacket);
+
+                    long deadlineNs =
+                            System.nanoTime()
+                                    + 650_000_000L;
+
+                    while (System.nanoTime() < deadlineNs) {
+                        byte[] replyBuffer =
+                                new byte[256];
+
+                        DatagramPacket reply =
+                                new DatagramPacket(
+                                        replyBuffer,
+                                        replyBuffer.length);
+
+                        try {
+                            socket.receive(reply);
+                        } catch (SocketTimeoutException timeout) {
+                            break;
+                        }
+
+                        long t4Us =
+                                System.nanoTime() / 1000L;
+
+                        String message =
+                                new String(
+                                        reply.getData(),
+                                        reply.getOffset(),
+                                        reply.getLength(),
+                                        "US-ASCII")
+                                        .trim();
+
+                        if (!message.startsWith(
+                                "SYNC_REPLY ")) {
+                            continue;
+                        }
+
+                        try {
+                            String[] parts =
+                                    message.split(" ");
+
+                            if (parts.length != 4) {
+                                continue;
+                            }
+
+                            long echoedT1 =
+                                    Long.parseLong(parts[1]);
+
+                            long t2Us =
+                                    Long.parseLong(parts[2]);
+
+                            long t3Us =
+                                    Long.parseLong(parts[3]);
+
+                            if (echoedT1 != t1Us) {
+                                continue;
+                            }
+
+                            long rttUs =
+                                    t4Us - t1Us;
+
+                            if (rttUs <= 0L
+                                    || rttUs > 1_000_000L) {
+                                continue;
+                            }
+
+                            // server = client + offset
+                            long offsetUs =
+                                    (
+                                            (t2Us - t1Us)
+                                                    + (t3Us - t4Us)
+                                    ) / 2L;
+
+                            // Establish from the lowest RTT sample.
+                            if (!clockSynced
+                                    || rttUs < bestSyncRttUs) {
+
+                                bestSyncRttUs = rttUs;
+                                clockOffsetUs =
+                                        offsetUs;
+                            } else {
+                                // Slowly track clock drift while ignoring
+                                // ordinary Wi-Fi jitter.
+                                long old =
+                                        clockOffsetUs;
+
+                                clockOffsetUs =
+                                        old
+                                                + (offsetUs - old) / 8L;
+                            }
+
+                            clockSynced = true;
+                        } catch (Exception ignored) {
+                        }
+                    }
+
+                    try {
+                        Thread.sleep(
+                                SYNC_INTERVAL_MS);
+                    } catch (InterruptedException e) {
+                        return;
+                    }
+                }
+            } catch (Exception e) {
+                android.util.Log.e(
+                        "CAVA",
+                        "control/sync thread died",
+                        e);
+            } finally {
+                if (socket != null) {
+                    try {
+                        socket.close();
+                    } catch (Exception ignored) {
+                    }
+                }
             }
-        }, "Mobulizer-Heartbeat");
+        }, "Mobulizer-ControlSync");
+
         t.setDaemon(true);
         t.start();
     }
@@ -772,3 +1182,4 @@ public class VisualizerRenderer implements GLSurfaceView.Renderer {
         return program;
     }
 }
+
