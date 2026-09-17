@@ -41,8 +41,8 @@ music on your PC
 
 ### Windows
 
-1. Make sure [Python](https://www.python.org/downloads/) is installed on your system and added in env path.
-2.. Download the latest Windows client<br>
+1. Make sure [Python](https://www.python.org/downloads/) is installed on your system and added in env path.<br>
+2. Download the latest Windows client<br>
 3. Open terminal in that direcory<br>
 ```powershell
 $ python.exe bridge.py
