@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <style
+        name="Theme.Mobulizer"
+        parent="android:style/Theme.Material.Light.NoActionBar">
+
+        <!-- Completely black background -->
+        <item name="android:windowBackground">#000000</item>
+
+        <!-- No action bar -->
+        <item name="android:windowNoTitle">true</item>
+
+        <!-- Fullscreen -->
+        <item name="android:windowFullscreen">true</item>
+
+        <!-- Don't dim the window -->
+        <item name="android:backgroundDimEnabled">false</item>
+
+        <!-- Black status/navigation bars if Android shows them -->
+        <item name="android:statusBarColor">#000000</item>
+        <item name="android:navigationBarColor">#000000</item>
+
+        <!-- Light status/navigation icons disabled -->
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+
+    </style>
+
+</resources>
