@@ -152,8 +152,8 @@ Mobulizer's own code is licensed under the MIT License.
 
 ## licenses
 
-Mobulizer --> MIT
-CAVA      --> GPLv3
+Mobulizer --> MIT<br>
+CAVA      --> GPLv3<br>
 
 ---
 
