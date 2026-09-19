@@ -79,8 +79,8 @@ It's my first time building so stay tuned for updates ᓚ₍⑅^..^₎♡
 
 ## Downloads
 
---> [Android](https://github.com/kirixber/releases/latest)<br>
---> [Windows](https://github.com/kirixber/releases/latest)<br>
+--> [Android](https://github.com/kirixber/mobulizer/releases/latest)<br>
+--> [Windows](https://github.com/kirixber/mobulizer/releases/latest)<br>
 --> Linux larping soon >.<
 
 ## contributing
