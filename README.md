@@ -14,7 +14,7 @@ No fancy setup. No need for the phone to play the audio. It just becomes a dedic
 
 ## features
 
-- real-time music visualization
+- real-time music visualization powered by CAVA
 - smooth, fluid animations
 - mirrored stereo spectrum
 - bass hits harder in the center
@@ -29,9 +29,11 @@ No fancy setup. No need for the phone to play the audio. It just becomes a dedic
 ```text
 music on your PC
        ↓
+      CAVA
+       ↓
    mobulizer
        ↓
-      Wi-Fi
+     Wi-Fi
        ↓
    old phone
        ↓
@@ -42,11 +44,15 @@ music on your PC
 
 ### Windows
 
-1. Download [Python](https://www.python.org/downloads/) and make sure it's added to your system's env path.
-2. Download the Windows client
+1. Download [Python](https://www.python.org/downloads/) and make sure it's added to your system PATH.
+2. Download the Windows client.
+3. Open a terminal in the Windows Client directory.
+4. Run:
+
 ```powershell
-   $ python.exe .\bridge.py
+python.exe .\bridge.py
 ```
+
 2. Mobulizer server started
 3. Make sure your phone is on the same Wi-Fi
 4. Open the Android app
@@ -77,6 +83,48 @@ But hey, that's part of the fun.
 
 It's my first time building so stay tuned for updates ᓚ₍⑅^..^₎♡
 
+## Folder Structure
+
+```markdown
+Mobulizer/
+│
+├── README.md
+├── LICENSE
+├── .gitignore
+│
+├── Android Client/
+│   ├── app/
+│   │   ├── src/
+│   │   │   └── main/
+│   │   │       ├── java/
+│   │   │       │   └── com/mobulizer/visualizer/
+│   │   │       │       ├── MainActivity.java
+│   │   │       │       ├── VisualizerGLView.java
+│   │   │       │       ├── VisualizerRenderer.java
+│   │   │       │       └── VisualizerView.java
+│   │   │       ├── res/
+│   │   │       └── AndroidManifest.xml
+│   │   └── build.gradle
+│   ├── build.gradle
+│   ├── settings.gradle
+│   └── README.md
+│
+├── Windows Client/
+│   ├── bridge.py
+│   ├── mobulizer.conf
+│   ├── requirements.txt
+│   ├── README.md
+│   │
+│   └── cava/
+│       ├── cava.exe
+│       ├── mobulizer_runtime.conf   ← generated at runtime
+│       └── ...other CAVA files...
+│
+└── docs/
+    ├── architecture.md
+    └── protocol.md
+```
+
 ## Downloads
 
 --> [Android](https://github.com/kirixber/mobulizer/releases/latest)<br>
@@ -93,9 +141,19 @@ Don't overthink it.
 
 would love to collaborate <3<br>
 
-## license
+## third-party
 
-MIT
+Mobulizer uses [CAVA](https://github.com/karlstav/cava) for real-time audio analysis.
+
+CAVA is licensed under the **GNU General Public License v3.0**.
+See the CAVA source and license included with the Windows client for its applicable license information.
+
+Mobulizer's own code is licensed under the MIT License.
+
+## licenses
+
+Mobulizer --> MIT
+CAVA      --> GPLv3
 
 ---
 

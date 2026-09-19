@@ -1,0 +1,6 @@
+# Mobulizer Windows Client
+#
+# The current bridge uses only Python's standard library.
+# No third-party Python packages are required.
+#
+# Python 3.x is required.
